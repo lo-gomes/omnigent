@@ -2140,10 +2140,10 @@ async def _persist_external_model_change(
     No-ops (no write, no event) when the observed model already equals
     the persisted ``model_override`` — the common case on the web→TUI
     round-trip where the web PATCH set the override moments earlier.
-    Also no-ops when the observed id is a stripped form of the
-    persisted override (Pi startup reports ``ctx.model.id`` without
-    ``provider/``), so a later relaunch still receives the requested
-    identifier.
+    Also no-ops when a Pi ``source=startup`` report is a stripped form
+    of the persisted override (catalog id without ``provider/``). A
+    genuine user model or thinking-level change is not tagged startup
+    and still persists, including ``:high`` → no-suffix (thinking off).
 
     :param session_id: Session/conversation identifier, e.g.
         ``"conv_abc123"``.
@@ -2164,11 +2164,15 @@ async def _persist_external_model_change(
     model = raw_model.strip()
     if conv.model_override == model:
         return
-    # A Pi startup report of ``ctx.model.id`` (``composer-2-5:slow``)
-    # must not replace an explicit ``cursor/composer-2-5:slow`` override.
-    # A genuine switch to a different model is not a stripped spelling
-    # and still persists below.
-    if conv.model_override and is_stripped_model_override(model, conv.model_override):
+    # Only a distinguishable Pi startup reflection may be ignored when
+    # it drops provider/suffix. User ``/model`` and thinking-level
+    # changes omit ``source=startup`` and must persist.
+    raw_source = body.data.get("source")
+    if (
+        raw_source == "startup"
+        and conv.model_override
+        and is_stripped_model_override(model, conv.model_override)
+    ):
         return
     await asyncio.to_thread(
         conversation_store.update_conversation,

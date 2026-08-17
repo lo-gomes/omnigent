@@ -2665,6 +2665,7 @@ global.fetch = async (_url, request) => {
 };
 
 const setModelCalls = [];
+const setThinkingLevelCalls = [];
 // The catalog Pi's modelRegistry exposes; setModel returns false for a model
 // with no configured API key (mirrors Pi's real contract).
 const catalog = [
@@ -2680,6 +2681,8 @@ const pi = {
     setModelCalls.push(model);
     return !!(model && model.hasKey);
   },
+  setThinkingLevel(level) { setThinkingLevelCalls.push(level); },
+  getThinkingLevel() { return "off"; },
 };
 
 require(extensionPath)(pi);
@@ -2880,6 +2883,7 @@ def test_session_start_posts_model_options_from_registry(tmp_path: Path) -> None
   const changes = posted.filter((e) => e.type === "external_model_change");
   assert.equal(changes.length, 1, JSON.stringify(posted));
   assert.equal(changes[0].data.model, "databricks-claude-sonnet-4-6");
+  assert.equal(changes[0].data.source, "startup");
   finish();
 })().catch((error) => {
   finish();
@@ -2954,6 +2958,7 @@ def test_session_start_reports_provider_qualified_pi_model(tmp_path: Path) -> No
   const changes = posted.filter((e) => e.type === "external_model_change");
   assert.equal(changes.length, 1, JSON.stringify(posted));
   assert.equal(changes[0].data.model, "cursor/composer-2-5:slow");
+  assert.equal(changes[0].data.source, "startup");
 
   const opts = posted.filter((e) => e.type === "external_model_options");
   assert.equal(opts.length, 1, JSON.stringify(posted));
@@ -2993,6 +2998,7 @@ def test_session_start_appends_pi_thinking_suffix_when_split_off(tmp_path: Path)
   const changes = posted.filter((e) => e.type === "external_model_change");
   assert.equal(changes.length, 1, JSON.stringify(posted));
   assert.equal(changes[0].data.model, "anthropic/claude-sonnet-4-6:high");
+  assert.equal(changes[0].data.source, "startup");
   finish();
 })().catch((error) => {
   finish();
@@ -3027,7 +3033,85 @@ def test_inbox_model_change_resolves_provider_qualified_id(tmp_path: Path) -> No
   assert.equal(setModelCalls.length, 1, JSON.stringify(setModelCalls));
   assert.equal(setModelCalls[0].id, "grok-4.6:slow");
   assert.equal(setModelCalls[0].provider, "cursor");
+  assert.equal(setThinkingLevelCalls[setThinkingLevelCalls.length - 1], "off");
   assert.equal(errorItems().length, 0, JSON.stringify(posted));
+  finish();
+})().catch((error) => {
+  finish();
+  console.error(error && error.stack ? error.stack : error);
+  process.exit(1);
+});
+"""
+    )
+    _run_extension_script(node, _extension_path(), script)
+
+
+def test_inbox_model_change_applies_pi_thinking_level(tmp_path: Path) -> None:
+    """A web pick of ``provider/id:high`` must call ``setThinkingLevel("high")``."""
+    del tmp_path
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("node is required for the pi-native extension e2e test")
+
+    script = (
+        _MODEL_SWITCH_HARNESS
+        + r"""
+(async () => {
+  ctx.thinkingLevel = "low";
+  ctx.model = { id: "claude-sonnet-4-6", provider: "anthropic", name: "Sonnet", hasKey: true };
+  ctx.modelRegistry.getAll = () => [ctx.model];
+  ctx.modelRegistry.getAvailable = () => [ctx.model];
+  await handlers.session_start({}, ctx);
+  setThinkingLevelCalls.length = 0;
+  await deliverModelChange("anthropic/claude-sonnet-4-6:high");
+
+  assert.equal(setModelCalls.length, 1, JSON.stringify(setModelCalls));
+  assert.equal(setModelCalls[0].id, "claude-sonnet-4-6");
+  assert.deepEqual(setThinkingLevelCalls, ["high"], JSON.stringify(setThinkingLevelCalls));
+  assert.equal(errorItems().length, 0, JSON.stringify(posted));
+  finish();
+})().catch((error) => {
+  finish();
+  console.error(error && error.stack ? error.stack : error);
+  process.exit(1);
+});
+"""
+    )
+    _run_extension_script(node, _extension_path(), script)
+
+
+def test_thinking_level_select_mirrors_full_reference(tmp_path: Path) -> None:
+    """A user thinking change posts the full reference, not a startup source."""
+    del tmp_path
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("node is required for the pi-native extension e2e test")
+
+    script = (
+        _MODEL_SWITCH_HARNESS
+        + r"""
+(async () => {
+  ctx.model = { id: "claude-sonnet-4-6", provider: "anthropic", name: "Sonnet" };
+  ctx.thinkingLevel = "high";
+  ctx.modelRegistry.getAll = () => [ctx.model];
+  ctx.modelRegistry.getAvailable = () => [ctx.model];
+  await handlers.session_start({}, ctx);
+  assert.equal(typeof handlers.thinking_level_select, "function");
+
+  // Initial assignment (no previousLevel) is ignored.
+  await handlers.thinking_level_select({ level: "high" }, ctx);
+  const afterStart = posted.filter((e) => e.type === "external_model_change");
+  assert.equal(afterStart.length, 1, JSON.stringify(posted));
+  assert.equal(afterStart[0].data.source, "startup");
+
+  await handlers.thinking_level_select(
+    { level: "off", previousLevel: "high" },
+    { ...ctx, thinkingLevel: "off" },
+  );
+  const changes = posted.filter((e) => e.type === "external_model_change");
+  assert.equal(changes.length, 2, JSON.stringify(posted));
+  assert.equal(changes[1].data.model, "anthropic/claude-sonnet-4-6");
+  assert.equal(changes[1].data.source, "thinking_level_select");
   finish();
 })().catch((error) => {
   finish();

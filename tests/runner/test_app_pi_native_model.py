@@ -650,45 +650,54 @@ def test_append_pi_native_requested_model_is_idempotent_and_isolated() -> None:
     assert joined == ["--model=cursor/grok-4.6:slow"]
 
 
-def _dump_pi_selected_model(tmp_path: Path, requested: str) -> dict[str, Any]:
-    """Launch real ``pi`` with *requested* and return ``ctx.model`` at session_start.
+def _pi_cursor_sdk_path() -> Path | None:
+    """Return the installed ``pi-cursor-sdk`` extension dir, or ``None``.
 
-    Uses a throwaway ``PI_CODING_AGENT_DIR`` so this never reads or writes
-    ``~/.pi/agent``. The dump extension exits before any user prompt, so
-    the evidence is Pi's selected model, not Omnigent metadata.
+    Override with ``PI_CURSOR_SDK_PATH``. Default is the per-user Pi
+    package install. Existence of ``package.json`` is the check — we
+    never invent a fake Cursor provider.
+    """
+    override = os.environ.get("PI_CURSOR_SDK_PATH", "").strip()
+    candidate = (
+        Path(override)
+        if override
+        else Path.home() / ".pi" / "agent" / "npm" / "node_modules" / "pi-cursor-sdk"
+    )
+    if (candidate / "package.json").is_file():
+        return candidate
+    return None
+
+
+def _dump_pi_cursor_sdk_selected_model(tmp_path: Path, requested: str) -> dict[str, Any]:
+    """Launch real ``pi`` + ``pi-cursor-sdk`` and dump ``ctx.model`` at session_start.
+
+    Isolated ``PI_CODING_AGENT_DIR`` — never reads or writes ``~/.pi/agent``.
+    Explicit ``-e`` still loads the SDK under ``--no-extensions``. The dump
+    extension exits before any user prompt. ``CURSOR_API_KEY`` is stripped
+    from the child env so this never prints or persists credentials; the
+    SDK's fallback catalog is enough to resolve the requested id.
 
     :param tmp_path: Pytest temp dir for this launch.
-    :param requested: Opaque Pi model id, e.g. ``cursor/composer-2-5:slow``.
-    :returns: JSON object with ``id``, ``provider``, ``thinkingLevel``.
+    :param requested: Opaque Pi/Cursor id, e.g. ``cursor/composer-2-5:slow``.
+    :returns: JSON with ``id``, ``provider``, ``api``, ``thinkingLevel``.
     """
     pi_bin = shutil.which("pi")
-    if pi_bin is None:
-        pytest.skip("pi CLI is required for the live first-turn model dump")
+    sdk_path = _pi_cursor_sdk_path()
+    if pi_bin is None or sdk_path is None:
+        pytest.skip(
+            "pi CLI and pi-cursor-sdk are required for first-turn Cursor model "
+            "evidence. Install pi-cursor-sdk (or set PI_CURSOR_SDK_PATH to its "
+            "package dir) and keep `pi` on PATH. Do not substitute a fake "
+            "OpenAI cursor provider. Manual repro: "
+            "PI_CODING_AGENT_DIR=<tmp> pi --offline --no-extensions "
+            "--no-session --approve -e <pi-cursor-sdk> -e dump.js "
+            "--model cursor/composer-2-5:slow"
+        )
 
     slug = requested.replace("/", "_").replace(":", "_")
-    work = tmp_path / f"pi-live-{slug}"
+    work = tmp_path / f"pi-cursor-{slug}"
     agent_dir = work / "agent"
     agent_dir.mkdir(parents=True, mode=0o700)
-    (agent_dir / "models.json").write_text(
-        json.dumps(
-            {
-                "providers": {
-                    "cursor": {
-                        "baseUrl": "http://127.0.0.1:9/v1",
-                        "api": "openai-completions",
-                        "apiKey": "dummy",
-                        "models": [
-                            {"id": "grok-4.5:slow"},
-                            {"id": "grok-4.6:slow"},
-                            {"id": "composer-2-5:slow"},
-                        ],
-                    }
-                }
-            },
-            indent=2,
-        ),
-        encoding="utf-8",
-    )
     out_path = work / "selected.json"
     dump_js = work / "dump.js"
     dump_js.write_text(
@@ -702,6 +711,7 @@ def _dump_pi_selected_model(tmp_path: Path, requested: str) -> dict[str, Any]:
                 fs.writeFileSync(out, JSON.stringify({{
                   id: model.id || null,
                   provider: model.provider || null,
+                  api: model.api || null,
                   thinkingLevel: (ctx && ctx.thinkingLevel) || null,
                 }}));
                 process.exit(0);
@@ -714,6 +724,7 @@ def _dump_pi_selected_model(tmp_path: Path, requested: str) -> dict[str, Any]:
     env = os.environ.copy()
     env["PI_CODING_AGENT_DIR"] = str(agent_dir)
     env["PI_OFFLINE"] = "1"
+    env.pop("CURSOR_API_KEY", None)
     proc = subprocess.run(
         [
             pi_bin,
@@ -724,24 +735,26 @@ def _dump_pi_selected_model(tmp_path: Path, requested: str) -> dict[str, Any]:
             "--no-prompt-templates",
             "--no-context-files",
             "--no-session",
+            "--approve",
+            "--extension",
+            str(sdk_path),
             "--extension",
             str(dump_js),
-            "--provider",
-            "cursor",
             "--model",
             requested,
-            "--api-key",
-            "dummy",
         ],
         cwd=str(work),
         env=env,
         capture_output=True,
         check=False,
         text=True,
-        timeout=20,
+        timeout=45,
     )
-    assert proc.returncode == 0, proc.stdout + proc.stderr
-    assert out_path.is_file(), proc.stdout + proc.stderr
+    assert proc.returncode == 0, (
+        "pi-cursor-sdk dump failed (stdout/stderr omitted if they may "
+        f"contain secrets); dump exists={out_path.is_file()}"
+    )
+    assert out_path.is_file(), "pi-cursor-sdk dump wrote no session_start evidence"
     payload = json.loads(out_path.read_text(encoding="utf-8"))
     assert isinstance(payload, dict)
     return payload
@@ -755,23 +768,29 @@ def _dump_pi_selected_model(tmp_path: Path, requested: str) -> dict[str, Any]:
         "cursor/composer-2-5:slow",
     ),
 )
-def test_pi_selects_requested_model_before_first_prompt(tmp_path: Path, requested: str) -> None:
-    """Real Pi session_start ctx must match the requested opaque identifier.
+def test_pi_cursor_sdk_selects_requested_model_before_first_prompt(
+    tmp_path: Path, requested: str
+) -> None:
+    """Real pi-cursor-sdk session_start must match the requested Cursor id.
 
-    Launch argv is necessary but not sufficient: this dumps ``ctx.model``
-    from the live ``pi`` process before any user message.
+    Evidence is ``ctx.model`` from a live ``pi`` process with
+    ``pi-cursor-sdk`` loaded (``api === "cursor-sdk"``), not argv,
+    models.json, or a fake OpenAI cursor provider.
     """
-    selected = _dump_pi_selected_model(tmp_path, requested)
+    selected = _dump_pi_cursor_sdk_selected_model(tmp_path, requested)
+    assert selected["api"] == "cursor-sdk", selected
     provider, _, catalog_id = requested.partition("/")
     assert selected["provider"] == provider, selected
     assert selected["id"] == catalog_id, selected
     assert f"{selected['provider']}/{selected['id']}" == requested
 
 
-def test_pi_selected_models_do_not_bleed_across_live_jobs(tmp_path: Path) -> None:
-    """Two fresh Pi processes with different ``--model`` values stay isolated."""
-    first = _dump_pi_selected_model(tmp_path, "cursor/grok-4.5:slow")
-    second = _dump_pi_selected_model(tmp_path, "cursor/composer-2-5:slow")
+def test_pi_cursor_sdk_models_do_not_bleed_across_live_jobs(tmp_path: Path) -> None:
+    """Two fresh pi-cursor-sdk processes with different ``--model`` stay isolated."""
+    first = _dump_pi_cursor_sdk_selected_model(tmp_path, "cursor/grok-4.5:slow")
+    second = _dump_pi_cursor_sdk_selected_model(tmp_path, "cursor/composer-2-5:slow")
+    assert first["api"] == "cursor-sdk", first
+    assert second["api"] == "cursor-sdk", second
     assert f"{first['provider']}/{first['id']}" == "cursor/grok-4.5:slow"
     assert f"{second['provider']}/{second['id']}" == "cursor/composer-2-5:slow"
     assert first["id"] != second["id"]

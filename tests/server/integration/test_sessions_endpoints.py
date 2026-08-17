@@ -5855,7 +5855,10 @@ async def test_post_external_model_change_keeps_specific_override(
 
     stripped = await client.post(
         f"/v1/sessions/{session['id']}/events",
-        json={"type": "external_model_change", "data": {"model": "composer-2-5:slow"}},
+        json={
+            "type": "external_model_change",
+            "data": {"model": "composer-2-5:slow", "source": "startup"},
+        },
     )
     assert stripped.status_code == 202, stripped.text
     assert [event["type"] for _, event in published] == []
@@ -5870,6 +5873,48 @@ async def test_post_external_model_change_keeps_specific_override(
     assert [event["type"] for _, event in published] == ["session.model"]
     snapshot = (await client.get(f"/v1/sessions/{session['id']}")).json()
     assert snapshot["model_override"] == "cursor/grok-4.6:slow"
+
+
+async def test_post_external_model_change_thinking_off_persists(
+    client: httpx.AsyncClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A genuine thinking-off report must persist, even if it looks stripped.
+
+    ``source=startup`` is the only case that may ignore a shorter id.
+    A user turning thinking from ``:high`` to ``off`` posts the bare
+    ``provider/id`` with ``source=thinking_level_select`` (or no source)
+    and the next launch must not restore ``:high``.
+    """
+    published: list[tuple[str, dict[str, Any]]] = []
+    monkeypatch.setattr(
+        "omnigent.server.routes.sessions.session_stream.publish",
+        lambda sid, ev: published.append((sid, ev)),
+    )
+    agent = await create_test_agent(client)
+    session = await _create_session(client, agent["id"])
+
+    patch = await client.patch(
+        f"/v1/sessions/{session['id']}",
+        json={"model_override": "anthropic/claude-sonnet-4-6:high", "silent": True},
+    )
+    assert patch.status_code == 200, patch.text
+    published.clear()
+
+    thinking_off = await client.post(
+        f"/v1/sessions/{session['id']}/events",
+        json={
+            "type": "external_model_change",
+            "data": {
+                "model": "anthropic/claude-sonnet-4-6",
+                "source": "thinking_level_select",
+            },
+        },
+    )
+    assert thinking_off.status_code == 202, thinking_off.text
+    assert [event["type"] for _, event in published] == ["session.model"]
+    snapshot = (await client.get(f"/v1/sessions/{session['id']}")).json()
+    assert snapshot["model_override"] == "anthropic/claude-sonnet-4-6"
 
 
 async def test_post_external_model_change_rejects_empty_model(

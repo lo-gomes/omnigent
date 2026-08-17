@@ -932,8 +932,8 @@ function modelMatchesRequested(model, requested) {
  *   - Model id not in the registry: post an error item, return false.
  *   - setModel returned false (no API key for the model): post an error item,
  *     return false.
- *   - Applied: return true. The paired ``model_select`` handler mirrors the
- *     resulting model back to Omnigent, so the web pill reflects the switch.
+ *   - Applied: setModel plus setThinkingLevel when the id carried a Pi
+ *     thinking suffix. The paired ``model_select`` handler mirrors back.
  */
 async function applyModelChange(pi, config, ctx, modelId) {
   const id = typeof modelId === "string" ? modelId.trim() : "";
@@ -981,6 +981,13 @@ async function applyModelChange(pi, config, ctx, modelId) {
           "configured for it.",
       );
       return false;
+    }
+    // Pi keeps thinking as separate session state. ``:high`` on the
+    // requested id must call ``setThinkingLevel``; Cursor ``:slow`` is
+    // not a thinking suffix (splitRequestedModel leaves it on the id).
+    if (typeof pi.setThinkingLevel === "function") {
+      const { thinking } = splitRequestedModel(id);
+      pi.setThinkingLevel(thinking || "off");
     }
     return true;
   } catch (_err) {
@@ -1796,7 +1803,7 @@ module.exports = function (pi) {
     if (startupModelId) {
       await postEvent(config, {
         type: "external_model_change",
-        data: { model: startupModelId },
+        data: { model: startupModelId, source: "startup" },
       });
     }
     await postEvent(config, {
@@ -1826,7 +1833,23 @@ module.exports = function (pi) {
     if (!modelId) return;
     await postEvent(config, {
       type: "external_model_change",
-      data: { model: modelId },
+      data: { model: modelId, source: source || "set" },
+    });
+  });
+
+  pi.on("thinking_level_select", async (event, ctx) => {
+    rememberContext(ctx);
+    // Skip the initial thinking assignment (no previous level) so a
+    // startup ``off`` cannot overwrite an explicit ``:high`` override.
+    // A later user/API change has ``previousLevel`` and must persist.
+    if (!event || event.previousLevel == null || event.previousLevel === "") {
+      return;
+    }
+    const modelId = piModelReference(ctx && ctx.model, event.level);
+    if (!modelId) return;
+    await postEvent(config, {
+      type: "external_model_change",
+      data: { model: modelId, source: "thinking_level_select" },
     });
   });
 
