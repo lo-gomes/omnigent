@@ -849,6 +849,73 @@ async function triggerCompaction(config, ctx, customInstructions) {
   }
 }
 
+// Pi thinking suffixes (``--model provider/id:<thinking>``). Cursor
+// ``:fast`` / ``:slow`` are catalog ids, not thinking levels — do not
+// split them off when matching or reporting a model reference.
+const PI_THINKING_LEVELS = new Set([
+  "minimal",
+  "low",
+  "medium",
+  "high",
+  "xhigh",
+  "max",
+]);
+
+/**
+ * Opaque Pi reference for Omnigent: ``provider/id``, plus ``:<thinking>``
+ * when Pi split a thinking level off the catalog id. Cursor ``:slow``
+ * stays on ``id``; it is not a thinking suffix.
+ */
+function piModelReference(model, thinkingLevel) {
+  if (!model || typeof model.id !== "string") return "";
+  const id = model.id.trim();
+  if (!id) return "";
+  const provider =
+    model.provider && typeof model.provider === "string"
+      ? model.provider.trim()
+      : "";
+  let ref = provider ? `${provider}/${id}` : id;
+  const thinking =
+    typeof thinkingLevel === "string" ? thinkingLevel.trim().toLowerCase() : "";
+  if (
+    thinking &&
+    PI_THINKING_LEVELS.has(thinking) &&
+    !id.endsWith(`:${thinking}`) &&
+    !ref.endsWith(`:${thinking}`)
+  ) {
+    ref = `${ref}:${thinking}`;
+  }
+  return ref;
+}
+
+/** Strip a Pi thinking suffix; leave Cursor ``:fast`` / ``:slow`` on the id. */
+function splitRequestedModel(requested) {
+  const id = typeof requested === "string" ? requested.trim() : "";
+  if (!id) return { reference: "", thinking: "" };
+  const colon = id.lastIndexOf(":");
+  if (colon > 0) {
+    const suffix = id.slice(colon + 1).toLowerCase();
+    if (PI_THINKING_LEVELS.has(suffix)) {
+      return { reference: id.slice(0, colon), thinking: suffix };
+    }
+  }
+  return { reference: id, thinking: "" };
+}
+
+/**
+ * Return whether *model* is the registry entry named by *requested*.
+ *
+ * Accepts a bare catalog id, ``provider/id``, and ``provider/id:<thinking>``.
+ */
+function modelMatchesRequested(model, requested) {
+  const { reference } = splitRequestedModel(requested);
+  if (!model || typeof model.id !== "string" || !reference) return false;
+  const raw = typeof requested === "string" ? requested.trim() : "";
+  if (model.id === raw || model.id === reference) return true;
+  const qualified = piModelReference(model, "");
+  return qualified === raw || qualified === reference;
+}
+
 /**
  * Apply a web-picked model switch to the resident Pi process.
  *
@@ -894,7 +961,7 @@ async function applyModelChange(pi, config, ctx, modelId) {
   }
   let model;
   try {
-    model = listModels().find((m) => m && m.id === id);
+    model = listModels().find((m) => modelMatchesRequested(m, id));
   } catch (_err) {
     model = undefined;
   }
@@ -977,10 +1044,11 @@ async function postModelOptions(config, ctx) {
   const options = [];
   const seen = new Set();
   for (const model of models) {
-    const id = model && typeof model.id === "string" ? model.id : "";
+    const id = piModelReference(model, "");
     if (!id || seen.has(id)) continue;
     seen.add(id);
-    const name = model && typeof model.name === "string" && model.name ? model.name : id;
+    const name =
+      model && typeof model.name === "string" && model.name ? model.name : id;
     options.push({ id, displayName: name });
   }
   if (options.length === 0) return;
@@ -1721,8 +1789,10 @@ module.exports = function (pi) {
     // ``/login`` session (no Omnigent ``model_override``, no ``llm_model``)
     // shows no active model until the user switches. Mirrors the
     // ``model_select`` handler, but for the startup value ``ctx.model``.
-    const startupModelId =
-      ctx && ctx.model && typeof ctx.model.id === "string" ? ctx.model.id : "";
+    const startupModelId = piModelReference(
+      ctx && ctx.model,
+      ctx && ctx.thinkingLevel,
+    );
     if (startupModelId) {
       await postEvent(config, {
         type: "external_model_change",
@@ -1752,7 +1822,7 @@ module.exports = function (pi) {
     const source = event && typeof event.source === "string" ? event.source : "";
     if (source === "restore") return;
     const model = event && event.model ? event.model : undefined;
-    const modelId = model && typeof model.id === "string" ? model.id : "";
+    const modelId = piModelReference(model, ctx && ctx.thinkingLevel);
     if (!modelId) return;
     await postEvent(config, {
       type: "external_model_change",

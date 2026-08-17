@@ -66,6 +66,36 @@ def validate_model_override(value: str) -> str:
     return stripped
 
 
+def is_stripped_model_override(observed: str, persisted: str) -> bool:
+    """Return whether *observed* is *persisted* with provider and/or suffix dropped.
+
+    A native harness startup report often carries Pi's catalog id
+    (``composer-2-5:slow``) without the ``provider/`` prefix, or the
+    base id without a ``:<thinking>`` / Cursor ``:slow`` suffix. Persisting
+    that stripped form would replace an explicit override such as
+    ``cursor/composer-2-5:slow`` and a later relaunch would no longer
+    pass the requested identifier.
+
+    :param observed: Model id reported by the harness, e.g.
+        ``"composer-2-5:slow"``.
+    :param persisted: Current session ``model_override``, e.g.
+        ``"cursor/composer-2-5:slow"``.
+    :returns: ``True`` when *observed* names the same model as
+        *persisted* but with the provider and/or a ``:<suffix>`` removed.
+    """
+    if not observed or not persisted or observed == persisted:
+        return False
+    slash = persisted.find("/")
+    rest = persisted[slash + 1 :] if slash != -1 else persisted
+    if slash != -1 and rest == observed:
+        return True
+    if persisted.startswith(observed + ":"):
+        return True
+    if slash != -1 and rest.startswith(observed + ":"):
+        return True
+    return False
+
+
 # Single-vendor harnesses only run their own vendor's models; multi-model
 # harnesses (pi, openai-agents) accept any validated id.
 # Reversed native spellings are valid harness ids (NATIVE_HARNESSES)

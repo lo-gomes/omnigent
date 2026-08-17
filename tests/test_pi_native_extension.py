@@ -2923,3 +2923,117 @@ def test_session_start_empty_registry_posts_no_model_options(tmp_path: Path) -> 
 """
     )
     _run_extension_script(node, _extension_path(), script)
+
+
+def test_session_start_reports_provider_qualified_pi_model(tmp_path: Path) -> None:
+    """Startup ``external_model_change`` must keep ``provider/id``, not bare id.
+
+    Pi's ``ctx.model.id`` for pi-cursor-sdk is ``composer-2-5:slow``;
+    ``ctx.model.provider`` is ``cursor``. Reporting only the id would
+    persist a stripped override and a later relaunch would drop the
+    provider. ``:slow`` is the catalog id, not a thinking suffix.
+    """
+    del tmp_path
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("node is required for the pi-native extension e2e test")
+
+    script = (
+        _MODEL_SWITCH_HARNESS
+        + r"""
+(async () => {
+  ctx.model = { id: "composer-2-5:slow", provider: "cursor", name: "Composer" };
+  ctx.thinkingLevel = "off";
+  ctx.modelRegistry.getAll = () => [
+    { id: "composer-2-5:slow", provider: "cursor", name: "Composer", hasKey: true },
+    { id: "grok-4.6:slow", provider: "cursor", name: "Grok", hasKey: true },
+  ];
+  ctx.modelRegistry.getAvailable = () => ctx.modelRegistry.getAll();
+  await handlers.session_start({}, ctx);
+
+  const changes = posted.filter((e) => e.type === "external_model_change");
+  assert.equal(changes.length, 1, JSON.stringify(posted));
+  assert.equal(changes[0].data.model, "cursor/composer-2-5:slow");
+
+  const opts = posted.filter((e) => e.type === "external_model_options");
+  assert.equal(opts.length, 1, JSON.stringify(posted));
+  assert.deepEqual(
+    opts[0].data.models.map((m) => m.id),
+    ["cursor/composer-2-5:slow", "cursor/grok-4.6:slow"],
+    JSON.stringify(opts[0].data.models),
+  );
+  finish();
+})().catch((error) => {
+  finish();
+  console.error(error && error.stack ? error.stack : error);
+  process.exit(1);
+});
+"""
+    )
+    _run_extension_script(node, _extension_path(), script)
+
+
+def test_session_start_appends_pi_thinking_suffix_when_split_off(tmp_path: Path) -> None:
+    """When Pi splits ``:<thinking>`` onto ``ctx.thinkingLevel``, reattach it."""
+    del tmp_path
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("node is required for the pi-native extension e2e test")
+
+    script = (
+        _MODEL_SWITCH_HARNESS
+        + r"""
+(async () => {
+  ctx.model = { id: "claude-sonnet-4-6", provider: "anthropic", name: "Sonnet" };
+  ctx.thinkingLevel = "high";
+  ctx.modelRegistry.getAll = () => [ctx.model];
+  ctx.modelRegistry.getAvailable = () => [ctx.model];
+  await handlers.session_start({}, ctx);
+
+  const changes = posted.filter((e) => e.type === "external_model_change");
+  assert.equal(changes.length, 1, JSON.stringify(posted));
+  assert.equal(changes[0].data.model, "anthropic/claude-sonnet-4-6:high");
+  finish();
+})().catch((error) => {
+  finish();
+  console.error(error && error.stack ? error.stack : error);
+  process.exit(1);
+});
+"""
+    )
+    _run_extension_script(node, _extension_path(), script)
+
+
+def test_inbox_model_change_resolves_provider_qualified_id(tmp_path: Path) -> None:
+    """A web pick of ``cursor/composer-2-5:slow`` matches the registry entry."""
+    del tmp_path
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("node is required for the pi-native extension e2e test")
+
+    script = (
+        _MODEL_SWITCH_HARNESS
+        + r"""
+(async () => {
+  ctx.model = { id: "composer-2-5:slow", provider: "cursor", name: "Composer", hasKey: true };
+  ctx.modelRegistry.getAll = () => [
+    { id: "composer-2-5:slow", provider: "cursor", name: "Composer", hasKey: true },
+    { id: "grok-4.6:slow", provider: "cursor", name: "Grok", hasKey: true },
+  ];
+  ctx.modelRegistry.getAvailable = () => ctx.modelRegistry.getAll();
+  await handlers.session_start({}, ctx);
+  await deliverModelChange("cursor/grok-4.6:slow");
+
+  assert.equal(setModelCalls.length, 1, JSON.stringify(setModelCalls));
+  assert.equal(setModelCalls[0].id, "grok-4.6:slow");
+  assert.equal(setModelCalls[0].provider, "cursor");
+  assert.equal(errorItems().length, 0, JSON.stringify(posted));
+  finish();
+})().catch((error) => {
+  finish();
+  console.error(error && error.stack ? error.stack : error);
+  process.exit(1);
+});
+"""
+    )
+    _run_extension_script(node, _extension_path(), script)

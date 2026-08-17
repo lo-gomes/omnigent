@@ -5827,6 +5827,51 @@ async def test_post_external_model_change_dedupes_when_unchanged(
     assert [event["type"] for _, event in published] == []
 
 
+async def test_post_external_model_change_keeps_specific_override(
+    client: httpx.AsyncClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A stripped Pi startup id must not overwrite ``provider/id[:suffix]``.
+
+    Pi reports ``ctx.model.id`` (``composer-2-5:slow``) on session_start.
+    If that replaced ``cursor/composer-2-5:slow``, the next launch would
+    drop the provider. A genuine switch to a different full id still
+    persists.
+    """
+    published: list[tuple[str, dict[str, Any]]] = []
+    monkeypatch.setattr(
+        "omnigent.server.routes.sessions.session_stream.publish",
+        lambda sid, ev: published.append((sid, ev)),
+    )
+    agent = await create_test_agent(client)
+    session = await _create_session(client, agent["id"])
+
+    patch = await client.patch(
+        f"/v1/sessions/{session['id']}",
+        json={"model_override": "cursor/composer-2-5:slow", "silent": True},
+    )
+    assert patch.status_code == 200, patch.text
+    published.clear()
+
+    stripped = await client.post(
+        f"/v1/sessions/{session['id']}/events",
+        json={"type": "external_model_change", "data": {"model": "composer-2-5:slow"}},
+    )
+    assert stripped.status_code == 202, stripped.text
+    assert [event["type"] for _, event in published] == []
+    snapshot = (await client.get(f"/v1/sessions/{session['id']}")).json()
+    assert snapshot["model_override"] == "cursor/composer-2-5:slow"
+
+    switched = await client.post(
+        f"/v1/sessions/{session['id']}/events",
+        json={"type": "external_model_change", "data": {"model": "cursor/grok-4.6:slow"}},
+    )
+    assert switched.status_code == 202, switched.text
+    assert [event["type"] for _, event in published] == ["session.model"]
+    snapshot = (await client.get(f"/v1/sessions/{session['id']}")).json()
+    assert snapshot["model_override"] == "cursor/grok-4.6:slow"
+
+
 async def test_post_external_model_change_rejects_empty_model(
     client: httpx.AsyncClient,
 ) -> None:

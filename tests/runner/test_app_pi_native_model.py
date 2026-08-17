@@ -17,6 +17,10 @@ pi-cursor-sdk), ``--model`` must still be appended from the session
 from __future__ import annotations
 
 import json
+import os
+import shutil
+import subprocess
+import textwrap
 from pathlib import Path
 from typing import Any
 
@@ -644,3 +648,130 @@ def test_append_pi_native_requested_model_is_idempotent_and_isolated() -> None:
     joined = ["--model=cursor/grok-4.6:slow"]
     _append_pi_native_requested_model(joined, "cursor/composer-2-5:slow")
     assert joined == ["--model=cursor/grok-4.6:slow"]
+
+
+def _dump_pi_selected_model(tmp_path: Path, requested: str) -> dict[str, Any]:
+    """Launch real ``pi`` with *requested* and return ``ctx.model`` at session_start.
+
+    Uses a throwaway ``PI_CODING_AGENT_DIR`` so this never reads or writes
+    ``~/.pi/agent``. The dump extension exits before any user prompt, so
+    the evidence is Pi's selected model, not Omnigent metadata.
+
+    :param tmp_path: Pytest temp dir for this launch.
+    :param requested: Opaque Pi model id, e.g. ``cursor/composer-2-5:slow``.
+    :returns: JSON object with ``id``, ``provider``, ``thinkingLevel``.
+    """
+    pi_bin = shutil.which("pi")
+    if pi_bin is None:
+        pytest.skip("pi CLI is required for the live first-turn model dump")
+
+    slug = requested.replace("/", "_").replace(":", "_")
+    work = tmp_path / f"pi-live-{slug}"
+    agent_dir = work / "agent"
+    agent_dir.mkdir(parents=True, mode=0o700)
+    (agent_dir / "models.json").write_text(
+        json.dumps(
+            {
+                "providers": {
+                    "cursor": {
+                        "baseUrl": "http://127.0.0.1:9/v1",
+                        "api": "openai-completions",
+                        "apiKey": "dummy",
+                        "models": [
+                            {"id": "grok-4.5:slow"},
+                            {"id": "grok-4.6:slow"},
+                            {"id": "composer-2-5:slow"},
+                        ],
+                    }
+                }
+            },
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+    out_path = work / "selected.json"
+    dump_js = work / "dump.js"
+    dump_js.write_text(
+        textwrap.dedent(
+            f"""\
+            const fs = require("fs");
+            const out = {json.dumps(str(out_path))};
+            module.exports = function (pi) {{
+              pi.on("session_start", async (_event, ctx) => {{
+                const model = ctx && ctx.model ? ctx.model : {{}};
+                fs.writeFileSync(out, JSON.stringify({{
+                  id: model.id || null,
+                  provider: model.provider || null,
+                  thinkingLevel: (ctx && ctx.thinkingLevel) || null,
+                }}));
+                process.exit(0);
+              }});
+            }};
+            """
+        ),
+        encoding="utf-8",
+    )
+    env = os.environ.copy()
+    env["PI_CODING_AGENT_DIR"] = str(agent_dir)
+    env["PI_OFFLINE"] = "1"
+    proc = subprocess.run(
+        [
+            pi_bin,
+            "--offline",
+            "--no-extensions",
+            "--no-skills",
+            "--no-themes",
+            "--no-prompt-templates",
+            "--no-context-files",
+            "--no-session",
+            "--extension",
+            str(dump_js),
+            "--provider",
+            "cursor",
+            "--model",
+            requested,
+            "--api-key",
+            "dummy",
+        ],
+        cwd=str(work),
+        env=env,
+        capture_output=True,
+        check=False,
+        text=True,
+        timeout=20,
+    )
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert out_path.is_file(), proc.stdout + proc.stderr
+    payload = json.loads(out_path.read_text(encoding="utf-8"))
+    assert isinstance(payload, dict)
+    return payload
+
+
+@pytest.mark.parametrize(
+    "requested",
+    (
+        "cursor/grok-4.5:slow",
+        "cursor/grok-4.6:slow",
+        "cursor/composer-2-5:slow",
+    ),
+)
+def test_pi_selects_requested_model_before_first_prompt(tmp_path: Path, requested: str) -> None:
+    """Real Pi session_start ctx must match the requested opaque identifier.
+
+    Launch argv is necessary but not sufficient: this dumps ``ctx.model``
+    from the live ``pi`` process before any user message.
+    """
+    selected = _dump_pi_selected_model(tmp_path, requested)
+    provider, _, catalog_id = requested.partition("/")
+    assert selected["provider"] == provider, selected
+    assert selected["id"] == catalog_id, selected
+    assert f"{selected['provider']}/{selected['id']}" == requested
+
+
+def test_pi_selected_models_do_not_bleed_across_live_jobs(tmp_path: Path) -> None:
+    """Two fresh Pi processes with different ``--model`` values stay isolated."""
+    first = _dump_pi_selected_model(tmp_path, "cursor/grok-4.5:slow")
+    second = _dump_pi_selected_model(tmp_path, "cursor/composer-2-5:slow")
+    assert f"{first['provider']}/{first['id']}" == "cursor/grok-4.5:slow"
+    assert f"{second['provider']}/{second['id']}" == "cursor/composer-2-5:slow"
+    assert first["id"] != second["id"]

@@ -15,6 +15,7 @@ from omnigent.model_override import (
     MODEL_OVERRIDE_MAX_LEN,
     canonical_model_spelling,
     harness_supports_model_override,
+    is_stripped_model_override,
     model_family_mismatch,
     normalize_model_for_provider,
     validate_model_override,
@@ -32,8 +33,9 @@ from omnigent.model_override import (
         "databricks/databricks-gpt-5-4",
         "vendor:tag",
         "o3",
-        # Opaque Pi + pi-cursor-sdk identifiers. The colon is Pi's thinking
-        # suffix (``provider/id:<thinking>``), not a shell/flag shape.
+        # Opaque Pi + pi-cursor-sdk identifiers. ``:slow`` is Cursor's
+        # fast/slow catalog suffix (not a Pi thinking level); the slash
+        # is the ``provider/id`` form Pi's ``--model`` flag accepts.
         "cursor/grok-4.5:slow",
         "cursor/grok-4.6:slow",
         "cursor/composer-2-5:slow",
@@ -52,6 +54,39 @@ def test_validate_model_override_accepts_real_id_shapes(value: str) -> None:
 def test_validate_model_override_strips_whitespace() -> None:
     """Surrounding whitespace is stripped, mirroring the PATCH path."""
     assert validate_model_override("  claude-opus-4-8  ") == "claude-opus-4-8"
+
+
+@pytest.mark.parametrize(
+    ("observed", "persisted"),
+    [
+        ("composer-2-5:slow", "cursor/composer-2-5:slow"),
+        ("grok-4.6:slow", "cursor/grok-4.6:slow"),
+        ("cursor/composer-2-5", "cursor/composer-2-5:slow"),
+        ("composer-2-5", "cursor/composer-2-5:slow"),
+        ("claude-sonnet-4-6", "anthropic/claude-sonnet-4-6:high"),
+    ],
+)
+def test_is_stripped_model_override_detects_provider_and_suffix_drop(
+    observed: str, persisted: str
+) -> None:
+    """A startup report of Pi's catalog id must not look like a user switch."""
+    assert is_stripped_model_override(observed, persisted) is True
+
+
+@pytest.mark.parametrize(
+    ("observed", "persisted"),
+    [
+        ("cursor/composer-2-5:slow", "cursor/composer-2-5:slow"),
+        ("cursor/grok-4.6:slow", "cursor/composer-2-5:slow"),
+        ("composer-2-5:slow", "cursor/grok-4.6:slow"),
+        ("opus", "sonnet"),
+        ("", "cursor/composer-2-5:slow"),
+        ("cursor/composer-2-5:slow", ""),
+    ],
+)
+def test_is_stripped_model_override_allows_genuine_switches(observed: str, persisted: str) -> None:
+    """Equal ids and unrelated models are not treated as a stripped report."""
+    assert is_stripped_model_override(observed, persisted) is False
 
 
 @pytest.mark.parametrize(
