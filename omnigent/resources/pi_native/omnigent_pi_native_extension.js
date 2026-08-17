@@ -982,12 +982,14 @@ async function applyModelChange(pi, config, ctx, modelId) {
       );
       return false;
     }
-    // Pi keeps thinking as separate session state. ``:high`` on the
-    // requested id must call ``setThinkingLevel``; Cursor ``:slow`` is
-    // not a thinking suffix (splitRequestedModel leaves it on the id).
+    // Pi keeps thinking as separate session state. Call
+    // ``setThinkingLevel`` only when the requested id carried an
+    // explicit Pi thinking suffix (``:high``). Cursor ``:slow`` is a
+    // catalog id, not thinking — forcing ``off`` would wipe an active
+    // ``high``/``low`` session on a Cursor model switch.
     if (typeof pi.setThinkingLevel === "function") {
       const { thinking } = splitRequestedModel(id);
-      pi.setThinkingLevel(thinking || "off");
+      if (thinking) pi.setThinkingLevel(thinking);
     }
     return true;
   } catch (_err) {

@@ -3028,13 +3028,58 @@ def test_inbox_model_change_resolves_provider_qualified_id(tmp_path: Path) -> No
   ];
   ctx.modelRegistry.getAvailable = () => ctx.modelRegistry.getAll();
   await handlers.session_start({}, ctx);
+  setThinkingLevelCalls.length = 0;
   await deliverModelChange("cursor/grok-4.6:slow");
 
   assert.equal(setModelCalls.length, 1, JSON.stringify(setModelCalls));
   assert.equal(setModelCalls[0].id, "grok-4.6:slow");
   assert.equal(setModelCalls[0].provider, "cursor");
-  assert.equal(setThinkingLevelCalls[setThinkingLevelCalls.length - 1], "off");
+  // Cursor ``:slow`` is a catalog suffix, not Pi thinking — do not
+  // force the current thinking level to ``off``.
+  assert.deepEqual(setThinkingLevelCalls, [], JSON.stringify(setThinkingLevelCalls));
   assert.equal(errorItems().length, 0, JSON.stringify(posted));
+  finish();
+})().catch((error) => {
+  finish();
+  console.error(error && error.stack ? error.stack : error);
+  process.exit(1);
+});
+"""
+    )
+    _run_extension_script(node, _extension_path(), script)
+
+
+def test_inbox_cursor_model_change_preserves_current_thinking_level(
+    tmp_path: Path,
+) -> None:
+    """A Cursor ``:slow`` pick must not call ``setThinkingLevel("off")``.
+
+    A session already at ``high``/``low`` would otherwise silently drop
+    thinking on every web switch to ``cursor/<id>:slow``.
+    """
+    del tmp_path
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("node is required for the pi-native extension e2e test")
+
+    script = (
+        _MODEL_SWITCH_HARNESS
+        + r"""
+(async () => {
+  ctx.thinkingLevel = "high";
+  ctx.model = { id: "composer-2-5:slow", provider: "cursor", name: "Composer", hasKey: true };
+  ctx.modelRegistry.getAll = () => [
+    { id: "composer-2-5:slow", provider: "cursor", name: "Composer", hasKey: true },
+    { id: "grok-4.6:slow", provider: "cursor", name: "Grok", hasKey: true },
+  ];
+  ctx.modelRegistry.getAvailable = () => ctx.modelRegistry.getAll();
+  await handlers.session_start({}, ctx);
+  setThinkingLevelCalls.length = 0;
+  await deliverModelChange("cursor/grok-4.6:slow");
+
+  assert.equal(setModelCalls.length, 1, JSON.stringify(setModelCalls));
+  assert.equal(setModelCalls[0].id, "grok-4.6:slow");
+  assert.deepEqual(setThinkingLevelCalls, [], JSON.stringify(setThinkingLevelCalls));
   finish();
 })().catch((error) => {
   finish();
