@@ -19,7 +19,7 @@ import sys
 import time
 import urllib.parse
 import uuid
-from collections.abc import Awaitable, Callable, Mapping, MutableMapping
+from collections.abc import Awaitable, Callable, Mapping, MutableMapping, Sequence
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, NamedTuple, Protocol
 
@@ -495,8 +495,9 @@ class _PiNativeLaunchConfig:
         the cursor-native launch to replay prior turns as a text preamble on
         the first message.
     :param model_override: Persisted per-session ``/model`` override, e.g.
-        ``"claude-4.6-sonnet-medium"``; ``None`` when unset. Consumed by the
-        cursor-native launch (``--model``), ignored by pi-native.
+        ``"cursor/composer-2-5:slow"``; ``None`` when unset. Consumed by
+        pi-native and cursor-native as the launch ``--model`` when the
+        user did not already pass one.
     """
 
     workspace: Path
@@ -1853,6 +1854,60 @@ def _pi_args_have_provider(args: list[str]) -> bool:
     return False
 
 
+def _pi_args_have_model(args: Sequence[str]) -> bool:
+    """Return whether *args* already pin ``--model``.
+
+    :param args: Pi CLI args (pass-through and/or already-built launch argv).
+    :returns: ``True`` when a ``--model`` / ``--model=`` flag is present.
+    """
+    return any(arg == "--model" or arg.startswith("--model=") for arg in args)
+
+
+def _pi_native_model_from_launch_args(args: Sequence[str]) -> str | None:
+    """Return the model id on Pi's launch argv, or ``None``.
+
+    This is execution evidence: the id the process will actually select,
+    not Omnigent session metadata. The last ``--model`` / ``--model=``
+    value wins so a later append is observable.
+
+    :param args: Pi CLI argument vector excluding the executable.
+    :returns: The selected model id, or ``None`` when argv has no model.
+    """
+    selected: str | None = None
+    pending = False
+    for arg in args:
+        if pending:
+            selected = arg
+            pending = False
+            continue
+        if arg == "--model":
+            pending = True
+            continue
+        if arg.startswith("--model="):
+            selected = arg.split("=", 1)[1] or None
+    return selected
+
+
+def _append_pi_native_requested_model(args: list[str], model: str | None) -> None:
+    """Append ``--model <id>`` when a requested model is not already on argv.
+
+    Pi's own login (pi-cursor-sdk) has no Omnigent ``models.json``, so
+    :func:`omnigent.pi_native_credentials.pi_native_provider_launch` never
+    adds ``--model``. Without this, a session ``model_override`` such as
+    ``cursor/composer-2-5:slow`` is stored in Omnigent metadata while the
+    launched Pi process keeps its default. Passing ``--model`` at spawn is
+    the first-turn control path: Pi applies it before any user prompt.
+    Mid-session UI switches still use the inbox ``model_change`` event.
+
+    :param args: Mutable Pi CLI argv being built for launch.
+    :param model: Requested opaque Pi model id, or ``None`` to leave argv
+        unchanged (Pi then uses its own default).
+    """
+    if not model or _pi_args_have_model(args):
+        return
+    args.extend(("--model", model))
+
+
 def _build_pi_native_args(
     *,
     terminal_launch_args: list[str] | None,
@@ -2152,21 +2207,21 @@ async def _auto_create_pi_terminal(
     # falls back to its own login). Writes a managed per-session Pi config dir,
     # never touching the user's global ``~/.pi/agent``.
     credential_warning: str | None = None
+    # model_override (set by /model or sys_session_create's model arg)
+    # takes precedence over the spec's pinned executor.model.
+    requested_model = launch_config.model_override or _pi_native_model_from_spec(agent_spec)
     if not _pi_args_have_provider(launch_config.terminal_launch_args or []):
         from omnigent.pi_native_credentials import (
             pi_native_provider_launch,
             resolve_pi_native_provider,
         )
 
-        # Thread the agent spec's pinned model (``executor.model``) into the
-        # resolved provider so the generated ``models.json`` — and the
-        # appended ``--model`` arg (see ``pi_native_provider_launch``) — select
-        # it, reaching parity with claude-native / cursor-native. ``None``
-        # (no model declared) keeps the provider's default model.
-        # model_override (set by /model or sys_session_create's model arg)
-        # takes precedence over the spec's pinned executor.model.
-        spec_model = launch_config.model_override or _pi_native_model_from_spec(agent_spec)
-        provider = resolve_pi_native_provider(model=spec_model)
+        # Thread the requested model into the resolved provider so the
+        # generated ``models.json`` — and the appended ``--model`` arg
+        # (see ``pi_native_provider_launch``) — select it, reaching parity
+        # with claude-native / cursor-native. ``None`` (no model declared)
+        # keeps the provider's default model.
+        provider = resolve_pi_native_provider(model=requested_model)
         if provider is not None:
             cred_env, cred_args = pi_native_provider_launch(bridge_dir / "pi-agent", provider)
             pi_env.update(cred_env)
@@ -2175,6 +2230,12 @@ async def _auto_create_pi_terminal(
             # like a silent hang; prefer that notice over the credential one
             # since it names the model the user actually picked.
             credential_warning = provider.unroutable_model_warning() or provider.credential_warning
+    # When no Omnigent provider is configured, Pi uses its own login
+    # (e.g. pi-cursor-sdk) and the block above adds no ``--model``. Append
+    # the requested id so the first user turn cannot run Pi's default.
+    # No-ops when argv already has ``--model`` (user pass-through or
+    # provider launch) or when nothing was requested.
+    _append_pi_native_requested_model(pi_args, requested_model)
     # Inherit the agent's os_env so its sandbox (e.g. ``type: none``),
     # egress_rules and env_passthrough are honoured. Without ``sandbox`` here
     # and ``parent_os_env`` below, launch_required_terminal falls back to

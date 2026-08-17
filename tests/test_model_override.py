@@ -32,6 +32,11 @@ from omnigent.model_override import (
         "databricks/databricks-gpt-5-4",
         "vendor:tag",
         "o3",
+        # Opaque Pi + pi-cursor-sdk identifiers. The colon is Pi's thinking
+        # suffix (``provider/id:<thinking>``), not a shell/flag shape.
+        "cursor/grok-4.5:slow",
+        "cursor/grok-4.6:slow",
+        "cursor/composer-2-5:slow",
     ],
 )
 def test_validate_model_override_accepts_real_id_shapes(value: str) -> None:
